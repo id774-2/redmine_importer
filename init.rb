@@ -7,8 +7,8 @@ Redmine::Plugin.register :redmine_importer do
   version '0.3.1'
 
   project_module :importer do
-    permission :import, :importer => :index
-    permission :match, :importer => :match
+    #permission :import, :importer => :index
+    #permission :match, :importer => :match
    
   end
   menu :project_menu, :importer, { :controller => 'importer', :action => 'index' }, :caption => :label_import, :before => :settings, :param => :project_id
