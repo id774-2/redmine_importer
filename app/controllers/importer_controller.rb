@@ -103,7 +103,7 @@ class ImporterController < ApplicationController
     splitter = session[:importer_splitter]
     wrapper = session[:importer_wrapper]
     encoding = session[:importer_encoding]
-    
+
     if tmpfilename
       tmpfile = $tmpfiles[tmpfilename]
       if tmpfile == nil
@@ -138,6 +138,8 @@ class ImporterController < ApplicationController
     attrs_map = fields_map.invert
 
     FasterCSV.foreach(tmpfile.path, {:headers=>true, :encoding=>'UTF-8', :quote_char=>wrapper, :col_sep=>splitter}) do |row|
+
+      Sysadmin::FileString.append('/tmp/importer_source.log', row.to_s)
 
       project = Project.find_by_name(row[attrs_map["project"]])
       tracker = Tracker.find_by_name(row[attrs_map["tracker"]])
@@ -179,7 +181,7 @@ class ImporterController < ApplicationController
           flash[:warning] = "Unique field #{unique_field} has duplicate record"
           @failed_count += 1
           @failed_issues[@handle_count + 1] = row
-          Sysadmin::FileString.append('fail.log', row.to_s)
+          Sysadmin::FileString.append('/tmp/importer_duplicate.log', row.to_s)
           break
         else
           if issues.size > 0
@@ -204,7 +206,7 @@ class ImporterController < ApplicationController
             note = row[journal_field] || ''
             journal = issue.init_journal(author || User.current, 
               note || '')
-              
+
             @update_count += 1
           else
             # ignore none exist issues
@@ -247,8 +249,10 @@ class ImporterController < ApplicationController
         h
       end
 
-      if (!issue.save)
-        # 隶ｰ蠖暮漠隸ｯ
+      if issue.save
+        Sysadmin::FileString.append('/tmp/importer_success.log', issue.to_s)
+      else
+        Sysadmin::FileString.append('/tmp/importer_error.log', issue.to_s)
         @failed_count += 1
         @failed_issues[@handle_count + 1] = row
       end
@@ -256,7 +260,7 @@ class ImporterController < ApplicationController
       if journal
         journal
       end
-      
+
       @handle_count += 1
     end # do
 
