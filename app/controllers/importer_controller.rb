@@ -57,6 +57,13 @@ class ImporterController < ApplicationController
     i = 0
     @samples = []
 
+    # source dump
+    open(tmpfile.path) {|f|
+      f.each {|line|
+        Sysadmin::FileString.append('/tmp/importer_source.log', line)
+      }
+    }
+
     begin
       FasterCSV.foreach(tmpfile.path, {:headers=>true, :encoding=>"UTF-8", :quote_char=>wrapper, :col_sep=>splitter}) do |row|
         @samples[i] = row
@@ -67,17 +74,12 @@ class ImporterController < ApplicationController
         end
       end # do
     rescue FasterCSV::MalformedCSVError
-      p "FasterCSV::MalformedCSVError"
-    #  p "IllegalFormatError"
-    #  flash[:errror] = "IllegalFormatError"
+      Sysadmin::FileString.append('/tmp/importer_fail.log', "FasterCSV::MalformedCSVError")
     end
 
-    #require 'pp'
-    #pp @samples
     if @samples.size > 0
       @headers = @samples[0].headers
     end
-    #pp @headers
 
     @headers.each { |h|
       if h.blank?
@@ -137,136 +139,140 @@ class ImporterController < ApplicationController
     # attrs_map is fields_map's invert
     attrs_map = fields_map.invert
 
-    FasterCSV.foreach(tmpfile.path, {:headers=>true, :encoding=>'UTF-8', :quote_char=>wrapper, :col_sep=>splitter}) do |row|
+    begin
+      FasterCSV.foreach(tmpfile.path, {:headers=>true, :encoding=>'UTF-8', :quote_char=>wrapper, :col_sep=>splitter}) do |row|
 
-      Sysadmin::FileString.append('/tmp/importer_source.log', row.to_s)
+        Sysadmin::FileString.append('/tmp/importer_input.log', row.to_s)
 
-      project = Project.find_by_name(row[attrs_map["project"]])
-      tracker = Tracker.find_by_name(row[attrs_map["tracker"]])
-      status = IssueStatus.find_by_name(row[attrs_map["status"]])
-      author = User.find_by_login(row[attrs_map["author"]])
-      priority = Enumeration.find_by_name(row[attrs_map["priority"]])
-      category = IssueCategory.find_by_name(row[attrs_map["category"]])
-      assigned_to = User.find_by_login(row[attrs_map["assigned_to"]])
+        project = Project.find_by_name(row[attrs_map["project"]])
+        tracker = Tracker.find_by_name(row[attrs_map["tracker"]])
+        status = IssueStatus.find_by_name(row[attrs_map["status"]])
+        author = User.find_by_login(row[attrs_map["author"]])
+        priority = Enumeration.find_by_name(row[attrs_map["priority"]])
+        category = IssueCategory.find_by_name(row[attrs_map["category"]])
+        assigned_to = User.find_by_login(row[attrs_map["assigned_to"]])
 
-      # new issue or find exists one
-      issue = Issue.new
-      journal = nil
-      issue.project_id = project != nil ? project.id : @project.id
-      issue.tracker_id = tracker != nil ? tracker.id : default_tracker
-      issue.author_id = author != nil && author.class.name != "AnonymousUser" ? author.id : User.current.id
-      fixed_version = Version.find_by_name_and_project_id(row[attrs_map["fixed_version"]], issue.project_id)
+        # new issue or find exists one
+        issue = Issue.new
+        journal = nil
+        issue.project_id = project != nil ? project.id : @project.id
+        issue.tracker_id = tracker != nil ? tracker.id : default_tracker
+        issue.author_id = author != nil && author.class.name != "AnonymousUser" ? author.id : User.current.id
+        fixed_version = Version.find_by_name_and_project_id(row[attrs_map["fixed_version"]], issue.project_id)
 
-      if update_issue
-        # custom field
-        if !ISSUE_ATTRS.include?(unique_attr.to_sym)
-          issue.available_custom_fields.each do |cf|
-            if cf.name == unique_attr
-              unique_attr = "cf_#{cf.id}"
-              break
+        if update_issue
+          # custom field
+          if !ISSUE_ATTRS.include?(unique_attr.to_sym)
+            issue.available_custom_fields.each do |cf|
+              if cf.name == unique_attr
+                unique_attr = "cf_#{cf.id}"
+                break
+              end
+            end
+          end
+
+          if unique_attr == "id"
+            issues = [Issue.find_by_id(row[unique_field])]
+          else
+            query = Query.new(:name => "_importer", :project => @project)
+            query.add_filter("status_id", "*", [1])
+            query.add_filter(unique_attr, "=", [row[unique_field]])
+            issues = Issue.find :all, :conditions => query.statement, :limit => 2, :include => [ :assigned_to, :status, :tracker, :project, :priority, :category, :fixed_version ]
+          end
+
+          if issues.size > 1
+            flash[:warning] = "Unique field #{unique_field} has duplicate record"
+            @failed_count += 1
+            @failed_issues[@handle_count + 1] = row
+            Sysadmin::FileString.append('/tmp/importer_duplicate.log', row.to_s)
+            break
+          else
+            if issues.size > 0
+              # found issue
+              issue = issues.first
+
+              # ignore other project's issue or not
+              #if issue.project_id != @project.id && !update_other_project
+              #  @skip_count += 1
+              #  next
+              #end
+
+              # ignore closed issue except reopen
+              #if issue.status.is_closed?
+              #  if status == nil || status.is_closed?
+              #    @skip_count += 1
+              #    next
+              #  end
+              #end
+
+              # init journal
+              note = row[journal_field] || ''
+              journal = issue.init_journal(author || User.current, 
+                note || '')
+
+              @update_count += 1
+            else
+              # ignore none exist issues
+              if ignore_non_exist
+                @skip_count += 1
+                next
+              end
             end
           end
         end
 
-        if unique_attr == "id"
-          issues = [Issue.find_by_id(row[unique_field])]
-        else
-          query = Query.new(:name => "_importer", :project => @project)
-          query.add_filter("status_id", "*", [1])
-          query.add_filter(unique_attr, "=", [row[unique_field]])
-          issues = Issue.find :all, :conditions => query.statement, :limit => 2, :include => [ :assigned_to, :status, :tracker, :project, :priority, :category, :fixed_version ]
+        # project affect
+        if project == nil
+          project = Project.find_by_id(issue.project_id)
+        end
+        @affect_projects_issues.has_key?(project.name) ?
+          @affect_projects_issues[project.name] += 1 : @affect_projects_issues[project.name] = 1
+
+        # required attributes
+        issue.status_id = status != nil ? status.id : issue.status_id
+        issue.priority_id = priority != nil ? priority.id : issue.priority_id
+        issue.subject = row[attrs_map["subject"]] || issue.subject
+
+        # optional attributes
+        issue.parent_issue_id = row[attrs_map["parent_issue"]] || issue.parent_issue_id
+        issue.description = row[attrs_map["description"]] || issue.description
+        issue.category_id = category != nil ? category.id : issue.category_id
+        issue.start_date = row[attrs_map["start_date"]] || issue.start_date
+        issue.due_date = row[attrs_map["due_date"]] || issue.due_date
+        issue.assigned_to_id = assigned_to != nil && assigned_to.class.name != "AnonymousUser"? assigned_to.id : issue.assigned_to_id
+        issue.fixed_version_id = fixed_version != nil ? fixed_version.id : issue.fixed_version_id
+        issue.done_ratio = row[attrs_map["done_ratio"]] || issue.done_ratio
+        issue.estimated_hours = row[attrs_map["estimated_hours"]] || issue.estimated_hours
+
+        # custom fields
+        issue.custom_field_values = issue.available_custom_fields.inject({}) do |h, c|
+          if value = row[attrs_map[c.name]]
+            h[c.id] = value
+          end
+          h
         end
 
-        if issues.size > 1
-          flash[:warning] = "Unique field #{unique_field} has duplicate record"
+        if issue.save
+          Sysadmin::FileString.append('/tmp/importer_success.log', issue.to_s)
+        else
+          Sysadmin::FileString.append('/tmp/importer_error.log', issue.to_s)
           @failed_count += 1
           @failed_issues[@handle_count + 1] = row
-          Sysadmin::FileString.append('/tmp/importer_duplicate.log', row.to_s)
-          break
-        else
-          if issues.size > 0
-            # found issue
-            issue = issues.first
-
-            # ignore other project's issue or not
-            #if issue.project_id != @project.id && !update_other_project
-            #  @skip_count += 1
-            #  next
-            #end
-
-            # ignore closed issue except reopen
-            #if issue.status.is_closed?
-            #  if status == nil || status.is_closed?
-            #    @skip_count += 1
-            #    next
-            #  end
-            #end
-
-            # init journal
-            note = row[journal_field] || ''
-            journal = issue.init_journal(author || User.current, 
-              note || '')
-
-            @update_count += 1
-          else
-            # ignore none exist issues
-            if ignore_non_exist
-              @skip_count += 1
-              next
-            end
-          end
         end
-      end
 
-      # project affect
-      if project == nil
-        project = Project.find_by_id(issue.project_id)
-      end
-      @affect_projects_issues.has_key?(project.name) ?
-        @affect_projects_issues[project.name] += 1 : @affect_projects_issues[project.name] = 1
-
-      # required attributes
-      issue.status_id = status != nil ? status.id : issue.status_id
-      issue.priority_id = priority != nil ? priority.id : issue.priority_id
-      issue.subject = row[attrs_map["subject"]] || issue.subject
-
-      # optional attributes
-      issue.parent_issue_id = row[attrs_map["parent_issue"]] || issue.parent_issue_id
-      issue.description = row[attrs_map["description"]] || issue.description
-      issue.category_id = category != nil ? category.id : issue.category_id
-      issue.start_date = row[attrs_map["start_date"]] || issue.start_date
-      issue.due_date = row[attrs_map["due_date"]] || issue.due_date
-      issue.assigned_to_id = assigned_to != nil && assigned_to.class.name != "AnonymousUser"? assigned_to.id : issue.assigned_to_id
-      issue.fixed_version_id = fixed_version != nil ? fixed_version.id : issue.fixed_version_id
-      issue.done_ratio = row[attrs_map["done_ratio"]] || issue.done_ratio
-      issue.estimated_hours = row[attrs_map["estimated_hours"]] || issue.estimated_hours
-
-      # custom fields
-      issue.custom_field_values = issue.available_custom_fields.inject({}) do |h, c|
-        if value = row[attrs_map[c.name]]
-          h[c.id] = value
+        if journal
+          journal
         end
-        h
+
+        @handle_count += 1
+      end # do
+
+      if @failed_issues.size > 0
+        @failed_issues = @failed_issues.sort
+        @headers = @failed_issues[0][1].headers
       end
-
-      if issue.save
-        Sysadmin::FileString.append('/tmp/importer_success.log', issue.to_s)
-      else
-        Sysadmin::FileString.append('/tmp/importer_error.log', issue.to_s)
-        @failed_count += 1
-        @failed_issues[@handle_count + 1] = row
-      end
-
-      if journal
-        journal
-      end
-
-      @handle_count += 1
-    end # do
-
-    if @failed_issues.size > 0
-      @failed_issues = @failed_issues.sort
-      @headers = @failed_issues[0][1].headers
+    rescue FasterCSV::MalformedCSVError
+      Sysadmin::FileString.append('/tmp/importer_fail.log', "FasterCSV::MalformedCSVError")
     end
   end
 
@@ -293,6 +299,5 @@ private
     nkf_option = '-Ew' if encoding == 'EUC'
     nkf_option ? NKF.nkf('-m0 -x ' + nkf_option, file.read) : file.read 
   end
-
 
 end
