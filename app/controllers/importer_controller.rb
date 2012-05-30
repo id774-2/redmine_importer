@@ -35,7 +35,7 @@ class ImporterController < ApplicationController
     @original_filename = file.original_filename
     tmpfile = Tempfile.new("redmine_importer")
     if tmpfile
-      tmpfile.write(convert_file(file, encoding))
+      tmpfile.write(convert_file(file, encoding).gsub(/\r\n?/, "\n"))
       tmpfile.close
       tmpfilename = File.basename(tmpfile.path)
       if !$tmpfiles
@@ -265,14 +265,14 @@ class ImporterController < ApplicationController
         end
 
         @handle_count += 1
-      end # do
-
-      if @failed_issues.size > 0
-        @failed_issues = @failed_issues.sort
-        @headers = @failed_issues[0][1].headers
-      end
+      end # foreach
     rescue FasterCSV::MalformedCSVError
       Sysadmin::FileString.append('/tmp/importer_fail.log', "FasterCSV::MalformedCSVError")
+    end # Transaction End
+
+    if @failed_issues.size > 0
+      @failed_issues = @failed_issues.sort
+      @headers = @failed_issues[0][1].headers
     end
   end
 
