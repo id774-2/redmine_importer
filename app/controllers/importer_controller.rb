@@ -2,6 +2,7 @@
 require 'tempfile'
 require 'nkf'
 require 'faster_csv'
+require 'sysadmin'
 #require 'csv'
 
 class ImporterController < ApplicationController
@@ -56,7 +57,7 @@ class ImporterController < ApplicationController
     i = 0
     @samples = []
 
-    #begin
+    begin
       FasterCSV.foreach(tmpfile.path, {:headers=>true, :encoding=>"UTF-8", :quote_char=>wrapper, :col_sep=>splitter}) do |row|
         @samples[i] = row
 
@@ -65,10 +66,11 @@ class ImporterController < ApplicationController
           break
         end
       end # do
-    #rescue CSV::IllegalFormatError
+    rescue FasterCSV::MalformedCSVError
+      p "FasterCSV::MalformedCSVError"
     #  p "IllegalFormatError"
     #  flash[:errror] = "IllegalFormatError"
-    #end
+    end
 
     #require 'pp'
     #pp @samples
@@ -76,7 +78,7 @@ class ImporterController < ApplicationController
       @headers = @samples[0].headers
     end
     #pp @headers
- 
+
     @headers.each { |h|
       if h.blank?
         flash[:error] = l(:label_header_blank);
@@ -94,7 +96,6 @@ class ImporterController < ApplicationController
       @attrs.push([cfield.name, cfield.name])
     end
     @attrs.sort!
-     
   end
 
   def result
@@ -110,7 +111,7 @@ class ImporterController < ApplicationController
         return
       end
     end
-    
+
     default_tracker = params[:default_tracker]
     update_issue = params[:update_issue]
     unique_field = params[:unique_field]
@@ -145,7 +146,7 @@ class ImporterController < ApplicationController
       priority = Enumeration.find_by_name(row[attrs_map["priority"]])
       category = IssueCategory.find_by_name(row[attrs_map["category"]])
       assigned_to = User.find_by_login(row[attrs_map["assigned_to"]])
-  
+
       # new issue or find exists one
       issue = Issue.new
       journal = nil
@@ -162,43 +163,43 @@ class ImporterController < ApplicationController
               unique_attr = "cf_#{cf.id}"
               break
             end
-          end 
+          end
         end
-        
+
         if unique_attr == "id"
           issues = [Issue.find_by_id(row[unique_field])]
         else
           query = Query.new(:name => "_importer", :project => @project)
           query.add_filter("status_id", "*", [1])
           query.add_filter(unique_attr, "=", [row[unique_field]])
-
           issues = Issue.find :all, :conditions => query.statement, :limit => 2, :include => [ :assigned_to, :status, :tracker, :project, :priority, :category, :fixed_version ]
         end
-        
+
         if issues.size > 1
           flash[:warning] = "Unique field #{unique_field} has duplicate record"
           @failed_count += 1
           @failed_issues[@handle_count + 1] = row
+          Sysadmin::FileString.append('fail.log', row.to_s)
           break
         else
           if issues.size > 0
             # found issue
             issue = issues.first
-            
+
             # ignore other project's issue or not
-            if issue.project_id != @project.id && !update_other_project
-              @skip_count += 1
-              next              
-            end
-            
+            #if issue.project_id != @project.id && !update_other_project
+            #  @skip_count += 1
+            #  next
+            #end
+
             # ignore closed issue except reopen
-            if issue.status.is_closed?
-              if status == nil || status.is_closed?
-                @skip_count += 1
-                next
-              end
-            end
-            
+            #if issue.status.is_closed?
+            #  if status == nil || status.is_closed?
+            #    @skip_count += 1
+            #    next
+            #  end
+            #end
+
             # init journal
             note = row[journal_field] || ''
             journal = issue.init_journal(author || User.current, 
@@ -214,7 +215,7 @@ class ImporterController < ApplicationController
           end
         end
       end
-      
+
       # project affect
       if project == nil
         project = Project.find_by_id(issue.project_id)
@@ -226,7 +227,7 @@ class ImporterController < ApplicationController
       issue.status_id = status != nil ? status.id : issue.status_id
       issue.priority_id = priority != nil ? priority.id : issue.priority_id
       issue.subject = row[attrs_map["subject"]] || issue.subject
-      
+
       # optional attributes
       issue.parent_issue_id = row[attrs_map["parent_issue"]] || issue.parent_issue_id
       issue.description = row[attrs_map["description"]] || issue.description
@@ -247,18 +248,18 @@ class ImporterController < ApplicationController
       end
 
       if (!issue.save)
-        # 记录错误
+        # 隶ｰ蠖暮漠隸ｯ
         @failed_count += 1
         @failed_issues[@handle_count + 1] = row
       end
-  
+
       if journal
         journal
       end
       
       @handle_count += 1
     end # do
-    
+
     if @failed_issues.size > 0
       @failed_issues = @failed_issues.sort
       @headers = @failed_issues[0][1].headers
